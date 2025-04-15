@@ -12,16 +12,14 @@ async def get_db_connection():
 
 
 async def generate_excel(app_id: int):
-    """
-    Генерирует детализированный Excel-отчёт по заявке.
-    """
+
     conn = await get_db_connection()
     query = "SELECT * FROM applications WHERE id = $1"
     application = await conn.fetchrow(query, app_id)
     await conn.close()
 
     if not application:
-        return None  # Если заявки нет, возвращаем None
+        return None
 
     # Создаём новую книгу Excel
     wb = Workbook()
