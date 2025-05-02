@@ -1,5 +1,3 @@
-# main.py - Основной файл FastAPI приложения
-
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from app.api.full_check import router as full_check_router
