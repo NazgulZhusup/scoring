@@ -24,34 +24,33 @@ async def full_check(
         vin: Optional[str] = Query(None, min_length=5, max_length=17, pattern=r'^[A-HJ-NPR-Z0-9]{5,17}$')
 ):
     try:
-        # Валидация данных и форматирование
+        # Преобразуем дату
         formatted_birthdate = birthdate.replace('.', '-')
+
+        # Собираем объект person
         person = PersonData(
             lastname=lastname,
             firstname=firstname,
             birthdate=formatted_birthdate,
             inn=inn,
-            passport=PassportData(
-                series=passport_series,
-                number=passport_number
-            ),
+            passport=PassportData(series=passport_series, number=passport_number),
             region=region if region != -1 else None
         )
 
         vehicle = VehicleData(vin=vin) if vin else None
 
-        # Выполнение проверок через asyncio
+        # Параллельные проверки
         results = await asyncio.gather(
-            _check_fssp(person),  # person — это объект типа PersonData
-            _check_mvd_passport(person),  # передаем объект PersonData
-            _check_mvd_restrictions(person),  # передаем объект PersonData
+            _check_fssp(person),
+            _check_mvd_passport(person),
+            _check_mvd_restrictions(person),
             _check_gibdd(vehicle) if vehicle else _skip_check("VIN не указан"),
             _check_arbitrage(person),
             _check_bankruptcy(person),
             return_exceptions=True
         )
 
-        # Обработка полученных результатов от сервисов
+        # Сопоставляем результаты с названиями сервисов
         services = {
             "fssp": _process_result(results[0], "ФССП"),
             "mvd_passport": _process_result(results[1], "МВД (паспорт)"),
@@ -61,14 +60,85 @@ async def full_check(
             "bankruptcy": _process_result(results[5], "Банкротства")
         }
 
-        # Расчет общего риска
-        total_risk = sum(s.penalty for s in services.values() if s and s.penalty)
+        # Логируем штрафы по каждому сервису
+        for service_key, result in services.items():
+            logger.info(f"Результат для {service_key}: penalty={result.penalty}, message={result.message}")
 
+        # Расчет общего риска
+        total_risk = sum(s.penalty or 0 for s in services.values() if isinstance(s, ApiResponse))
+
+        # Категория риска
+        if total_risk > 20:
+            risk_category = "Высокий"
+        elif total_risk > 10:
+            risk_category = "Средний"
+        else:
+            risk_category = "Низкий"
+
+        # Формирование краткого списка результатов
+        summary = [f"Проверка для: {lastname} {firstname}"]
+
+        # ФССП
+        fssp_data = services["fssp"].data or {}
+        if services["fssp"].count == 0:
+            summary.append("ФССП — данных не найдено")
+        else:
+            debts = fssp_data.get("executions", [])
+            descriptions = [d.get("subject", "долг") for d in debts]
+            summary.append(f"ФССП — найдено {len(debts)} записей: {', '.join(descriptions)}")
+
+        # Банкротство
+        bankruptcy_data = services["bankruptcy"].data or {}
+        cases = bankruptcy_data.get("cases", [])
+        if not cases:
+            summary.append("Банкротство — сведений нет")
+        else:
+            courts = [c.get("court", "неизвестный суд") for c in cases]
+            summary.append(f"Банкротство — {len(cases)} дел ({', '.join(courts)})")
+
+        # Паспорт
+        summary.append(
+            "Паспорт — действителен" if services["mvd_passport"].penalty == 0 else "Паспорт — недействителен")
+
+        # ГИБДД
+        gibdd_data = services["gibdd"].data or {}
+        fines = gibdd_data.get("fines", [])
+        accidents = gibdd_data.get("accidents", [])
+        issues = []
+        if fines:
+            issues.append(f"штрафов: {len(fines)}")
+        if accidents:
+            issues.append(f"ДТП: {len(accidents)}")
+        if gibdd_data.get("theft_status", {}).get("status") == "В угоне":
+            issues.append("в угоне")
+        if gibdd_data.get("restrictions"):
+            issues.append("ограничения на ТС")
+        summary.append("ГИБДД — " + (", ".join(issues) if issues else "ограничений нет"))
+
+        # Арбитраж
+        arbitrage_data = services["arbitrage"].data or {}
+        cases = arbitrage_data.get("cases", [])
+        if not cases:
+            summary.append("Арбитраж — дел не найдено")
+        else:
+            types = set(c.get("type", "дело") for c in cases)
+            summary.append(f"Арбитраж — {len(cases)} дел ({', '.join(types)})")
+
+        # МВД (самозапреты)
+        restrictions = services["mvd_restrictions"].data or {}
+        if not restrictions:
+            summary.append("Ограничения МВД — нет")
+        else:
+            summary.append("Ограничения МВД — найдены")
+
+        # Возвращаем ответ с результатами и кратким резюме
         return FullCheckResponse(
             status="ok",
             total_risk=total_risk,
             services=services,
-            details=None
+            details={
+                "summary": summary
+            }
         )
 
     except ValueError as e:
@@ -393,15 +463,15 @@ def _process_result(result: Any, service_name: str) -> ApiResponse:
     )
 
     if service_name == "ФССП":
-        cases = result.get("data", {}).get("executions", [])
-        count = len(cases)
-        penalty = min(20, count * 5)
+        executions = result.get("data", {}).get("executions", [])
+        count = len(executions)
+        penalty = min(20, count * 5)  # 5 баллов за запись, максимум 20
         return ApiResponse(
             status="ok",
-            message=f"Найдено {count} исполнительных производств",
+            message=f"Найдено {count} исполнительных производств" if count else "Исполнительные производства не найдены",
             penalty=penalty,
             count=count,
-            data={"cases": cases}
+            data={"cases": executions}
         )
 
     if service_name == "ГИБДД":

@@ -42,7 +42,7 @@ class FullCheckResponse(BaseModel):
     status: Literal[StatusEnum.OK, StatusEnum.ERROR] = StatusEnum.OK
     total_risk: int = 0
     services: Dict[str, ApiResponse]
-    details: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
 
 class ApiError(BaseModel):
     """Модель ошибки API"""
